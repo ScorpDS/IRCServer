@@ -1,12 +1,18 @@
 package server;
 
 
-import io.netty.channel.*;
+import com.google.common.collect.EvictingQueue;
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.SimpleChannelInboundHandler;
 
-import java.util.*;
-import java.util.logging.Level;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.logging.Logger;
 
+import static java.util.logging.Level.INFO;
 import static server.TelnetClientCommands.*;
 
 class MessageChannelHandler extends SimpleChannelInboundHandler<String> {
@@ -124,7 +130,7 @@ class MessageChannelHandler extends SimpleChannelInboundHandler<String> {
             }
             default -> {
                 handleLocalMessage(ctx, "Unknown command." + CRLF);
-                logger.log(Level.INFO, "Unknown command:%s".formatted(msg));
+                logger.log(INFO, "Unknown command:%s".formatted(msg));
             }
         }
 
@@ -156,7 +162,7 @@ class MessageChannelHandler extends SimpleChannelInboundHandler<String> {
     }
 
     private void handleJoin(ChannelHandlerContext ctx, String[] tokens) {
-        if (!screenState.equals(ScreenState.LOGGED_IN)) {
+        if (!(screenState.equals(ScreenState.LOGGED_IN) || screenState.equals(ScreenState.JOINED))) {
             ctx.write("You must login in order to be able to join any channel" + CRLF);
             return;
         }
