@@ -1,16 +1,9 @@
 package server;
 
 
-import io.netty.channel.Channel;
-import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.SimpleChannelInboundHandler;
-import io.netty.channel.group.ChannelGroup;
-import io.netty.channel.group.DefaultChannelGroup;
-import io.netty.util.concurrent.GlobalEventExecutor;
+import io.netty.channel.*;
 
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -19,38 +12,46 @@ import static server.TelnetClientCommands.*;
 class MessageChannelHandler extends SimpleChannelInboundHandler<String> {
 
     private final Logger logger = Logger.getLogger(TelnetIRCServer.class.getName());
-    private final String GREETING = "Hi, stranger!\n\r";
-    private final String COMMANDS = "Commands:\n\r/login <name> <password>\n\r/join <channel>\n\r/leave\n\r/users\n\r/channels\n\r";
-    private static ChannelGroup recipients = new DefaultChannelGroup(GlobalEventExecutor.INSTANCE);
+
     private static final int maxChannelSize = 10;
-    public static final int channelMessagesBufferSize = 10;
-    public static final String CRLF = "\n\r";
+    private static final int channelMessagesBufferSize = 10;
+
+    private static final String COMMANDS =
+            "Commands:\n\r/login <name> <password>\n\r/join <channel>\n\r/leave\n\r/users\n\r/channels\n\r";
+    private static final String CRLF = "\n\r";
 
     private final Map<String, Map<String, Channel>> channelsMap = TelnetIRCServer.getChannelsMap();
     private final Map<String, List<String>> channelsMessageBuffers = TelnetIRCServer.getChannelsMessageBuffers();
     private final Map<String, String> usersCredentials = TelnetIRCServer.getUsersCredentials();
+
+    private ScreenState screenState;
 
     private String currentChannel;
     private String currentUsername;
 
     @Override
     public void channelRegistered(ChannelHandlerContext ctx) {
-        ctx.write(GREETING + COMMANDS + CRLF);
+        ctx.write(COMMANDS + CRLF);
         ctx.flush();
+        screenState = ScreenState.CONNECTED;
     }
 
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, String msg) {
+        msg = msg.trim();
+
+        if (handleInfoScreenInput(ctx)) return;
 
         if (msg.isBlank() || msg.equals(CRLF)) {
             return;
         }
-        msg = msg.trim();
+
         if (msg.charAt(0) == '/') {
             handleSlashCommand(ctx, msg);
         } else {
             handleMessage(ctx, msg);
         }
+        ctx.flush();
     }
 
     @Override
@@ -69,41 +70,100 @@ class MessageChannelHandler extends SimpleChannelInboundHandler<String> {
         clearScreen(ctx);
     }
 
+    @Override
+    public void handlerRemoved(ChannelHandlerContext ctx) throws Exception {
+        removeFromCurrentChannel();
+        clearScreen(ctx);
+    }
+
+    private boolean handleInfoScreenInput(ChannelHandlerContext ctx) {
+        if (screenState.equals(ScreenState.USERS_INFO) || screenState.equals(ScreenState.CHANNELS_INFO)) {
+            if (null != currentChannel) {
+                updateChannelScreen(ctx, true);
+                screenState = ScreenState.JOINED;
+            } else if (null != currentUsername) {
+                updateClientHeader(ctx);
+                screenState = ScreenState.LOGGED_IN;
+            } else {
+                updateClientHeader(ctx);
+                screenState = ScreenState.CONNECTED;
+            }
+            ctx.flush();
+            return true;
+        }
+        return false;
+    }
+
     private void handleSlashCommand(ChannelHandlerContext ctx, String msg) {
-        updateClientHeader(ctx);
         String[] tokens = msg.split(" ");
         switch (tokens[0]) {
             case "/login" -> {
-                handleLogin(ctx, tokens);
+                if (screenState.equals(ScreenState.CONNECTED)) {
+                    handleLogin(ctx, tokens);
+                } else {
+                    ctx.write("You already logged in." + CRLF);
+                }
             }
             case "/join" -> {
                 handleJoin(ctx, tokens);
             }
             case "/leave" -> {
-                ctx.writeAndFlush("You just left channel " + currentChannel);
-                removeFromCurrentChannel();
+                handleLeave(ctx);
             }
             case "/users" -> {
                 if (null != currentChannel) {
-                    clearScreen(ctx);
-                    channelsMap.get(currentChannel).keySet().forEach(s -> ctx.write(s + CRLF));
-                    ctx.flush();
+                    handleInfo(ctx, channelsMap.get(currentChannel).keySet());
+                    screenState = ScreenState.USERS_INFO;
                 } else {
-                    ctx.writeAndFlush("You have not joined any channel yet.");
+                    ctx.write("You have not joined any channel yet." + CRLF);
                 }
             }
             case "/channels" -> {
-                channelsMap.keySet().forEach(s -> ctx.write(s + CRLF));
-                ctx.flush();
+                handleInfo(ctx, channelsMap.keySet());
+                screenState = ScreenState.CHANNELS_INFO;
             }
             default -> {
-                ctx.writeAndFlush("Unknown command." + CRLF);
+                handleLocalMessage(ctx, "Unknown command." + CRLF);
                 logger.log(Level.INFO, "Unknown command:%s".formatted(msg));
             }
         }
+
+    }
+
+    private void handleLocalMessage(ChannelHandlerContext ctx, String localMessage) {
+        if (screenState.equals(ScreenState.JOINED)) {
+            ctx.write(LOAD_SAVED_CURSOR_POS);
+            ctx.write(localMessage);
+            ctx.write(SAVE_CURSOR_POS);
+            updateChannelScreen(ctx, false);
+        } else {
+            ctx.write(localMessage);
+        }
+        ctx.flush();
+    }
+
+    private void handleInfo(ChannelHandlerContext ctx, Collection<String> infoList) {
+        clearScreen(ctx);
+        infoList.forEach(s -> ctx.write(s + CRLF));
+    }
+
+    private void handleLeave(ChannelHandlerContext ctx) {
+        if (null != currentChannel) {
+            broadcastMessageInCurrentChattingChannel("User %s has left the channel".formatted(currentUsername) + CRLF);
+            removeFromCurrentChannel();
+        }
+        ctx.channel().close();
     }
 
     private void handleJoin(ChannelHandlerContext ctx, String[] tokens) {
+        if (!screenState.equals(ScreenState.LOGGED_IN)) {
+            ctx.write("You must login in order to be able to join any channel" + CRLF);
+            return;
+        }
+        if (tokens.length < 2) {
+            ctx.write("You must specify channel you want to join");
+            return;
+        }
         String channel = tokens[1];
         if (channelsMap.containsKey(channel)) {
             Map<String, Channel> channels = channelsMap.computeIfAbsent(channel, s -> new HashMap<>());
@@ -118,11 +178,8 @@ class MessageChannelHandler extends SimpleChannelInboundHandler<String> {
                 clearScreen(ctx);
                 updateChannelScreen(ctx, true);
 
-                if (!channelsMessageBuffers.get(currentChannel).isEmpty()) {
-                    ctx.write(LOAD_SAVED_CURSOR_POS);
-                    channelsMessageBuffers.get(currentChannel).forEach(ctx::write);
-                }
-                printServerNotification(ctx, "User %s joined the channel.".formatted(currentUsername) + CRLF);
+                screenState = ScreenState.JOINED;
+                printServerNotification(ctx, "User %s has joined the channel.".formatted(currentUsername) + CRLF);
             }
         } else {
             updateClientHeader(ctx);
@@ -130,37 +187,49 @@ class MessageChannelHandler extends SimpleChannelInboundHandler<String> {
         }
     }
 
+    private void printMessagesFromChannelBufferFromSavedCursorPosition(ChannelHandlerContext ctx) {
+        if (!channelsMessageBuffers.get(currentChannel).isEmpty()) {
+            ctx.write(LOAD_SAVED_CURSOR_POS);
+            channelsMessageBuffers.get(currentChannel).forEach(ctx::write);
+            ctx.write(SAVE_CURSOR_POS);
+        }
+    }
+
     private void handleLogin(ChannelHandlerContext ctx, String[] tokens) {
         if (tokens.length > 2 && !tokens[1].isBlank() && !tokens[2].isBlank()) {
             String login = tokens[1];
             String password = tokens[2];
+
+            updateClientHeader(ctx);
+
             if (usersCredentials.containsKey(login)) {
                 if (usersCredentials.get(login).equals(password)) {
-                    updateClientHeader(ctx);
+
                     ctx.write("Login successful" + CRLF);
                     currentUsername = login;
-                    ctx.flush();
+                    screenState = ScreenState.LOGGED_IN;
                 } else {
-                    updateClientHeader(ctx);
-                    ctx.writeAndFlush("Incorrect password!" + CRLF);
+                    ctx.write("Incorrect password!" + CRLF);
                 }
             } else {
                 usersCredentials.put(login, password);
-                updateClientHeader(ctx);
                 ctx.write("Registered successfully" + CRLF);
                 currentUsername = login;
                 ctx.flush();
+                screenState = ScreenState.LOGGED_IN;
             }
         } else {
-            updateClientHeader(ctx);
             ctx.writeAndFlush("Login/password cannot be empty!" + CRLF);
         }
     }
 
     private void removeFromCurrentChannel() {
-        Map<String, Channel> userChannel = channelsMap.get(currentChannel);
-        if (null != currentChannel && null != userChannel) {
-            userChannel.remove(currentUsername);
+
+        if (null != currentChannel) {
+            Map<String, Channel> userChannel = channelsMap.get(currentChannel);
+            if (null != userChannel) {
+                userChannel.remove(currentUsername);
+            }
             currentChannel = null;
         }
     }
@@ -171,39 +240,39 @@ class MessageChannelHandler extends SimpleChannelInboundHandler<String> {
             return;
         }
         String userMsg = currentUsername + ": " + msg + CRLF;
-        broadcastMessageInCurrentChannel(userMsg);
+        broadcastMessageInCurrentChattingChannel(userMsg);
     }
 
-    private void broadcastMessageInCurrentChannel(String message) {
+    private void broadcastMessageInCurrentChattingChannel(String message) {
 
         if (channelsMap.containsKey(currentChannel) && null != channelsMap.get(currentChannel)) {
             for (Channel channel : channelsMap.get(currentChannel).values()) {
                 channel.write(LOAD_SAVED_CURSOR_POS);
                 channel.write(message);
                 channel.write(SAVE_CURSOR_POS);
-                channel.pipeline().get(MessageChannelHandler.class).updateChannelScreen(channel.pipeline().lastContext(), false);
+                channel.pipeline().get(MessageChannelHandler.class)
+                        .updateChannelScreen(channel.pipeline().context(MessageChannelHandler.class), false);
             }
 
-            List<String> channelBuff = channelsMessageBuffers.get(currentChannel);
-            channelBuff.add(message);
-            if (channelBuff.size() > channelMessagesBufferSize) {
-                channelBuff.remove(0);
-            }
+            addMessageToChannelMessageBuffer(message);
+        }
+    }
+
+    private void addMessageToChannelMessageBuffer(String message) {
+        List<String> channelBuff = channelsMessageBuffers.get(currentChannel);
+        channelBuff.add(message);
+        if (channelBuff.size() > channelMessagesBufferSize) {
+            channelBuff.remove(0);
         }
     }
 
     private void printServerNotification(ChannelHandlerContext ctx, String notificationText) {
-        ctx.writeAndFlush(SET_ITALIC_MODE);
-        broadcastMessageInCurrentChannel(notificationText);
+        broadcastMessageInCurrentChattingChannel(notificationText);
     }
 
     private void updateClientHeader(ChannelHandlerContext ctx) {
         ctx.write(CLEAR_SCREEN); //control sequence for telnet terminal to clear a screen
         ctx.write(COMMANDS);
-        if (null != currentChannel) {
-            ctx.write("Channel: " + currentChannel + CRLF);
-        }
-        ctx.flush();
     }
 
     private void clearScreen(ChannelHandlerContext ctx) {
@@ -219,7 +288,8 @@ class MessageChannelHandler extends SimpleChannelInboundHandler<String> {
         ctx.write(currentUsername + ": ");
         if (initial) {
             ctx.write(CRLF + SAVE_CURSOR_POS);
-            ctx.write(MOVE_TO_LINE_AND_COL.formatted(2, currentUsername.length() + 2));
+            printMessagesFromChannelBufferFromSavedCursorPosition(ctx);
+            ctx.write(MOVE_TO_LINE_AND_COL.formatted(2, currentUsername.length() + 3));
         }
         ctx.flush();
     }

@@ -15,21 +15,12 @@ import io.netty.util.concurrent.GlobalEventExecutor;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListSet;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 public class TelnetIRCServer {
-
-
-    /**
-     * ChannelGroup recipients =
-     * new DefaultChannelGroup(GlobalEventExecutor.INSTANCE);
-     * recipients.add(channelA);
-     * recipients.add(channelB);
-     *
-     * @param args
-     * @throws InterruptedException
-     */
 
     private final static Map<String, String> usersCredentials = new ConcurrentHashMap<>();
     private final static Map<String, Map<String, Channel>> channelsMap = new ConcurrentHashMap<>();
@@ -48,16 +39,17 @@ public class TelnetIRCServer {
     }
 
     public static void main(String[] args) throws InterruptedException {
+
         int port = 23;
 
         if (args.length > 0) {
             port = Integer.parseInt(args[0]);
         }
 
-        channelsMap.put("public", new HashMap<>());
-        channelsMap.put("movies", new HashMap<>());
-        channelsMessageBuffers.put("public", new ArrayList<>());
-        channelsMessageBuffers.put("movies", new ArrayList<>());
+        channelsMap.put("public", new ConcurrentHashMap<>());
+        channelsMap.put("movies", new ConcurrentHashMap<>());
+        channelsMessageBuffers.put("public", new CopyOnWriteArrayList<>());
+        channelsMessageBuffers.put("movies", new CopyOnWriteArrayList<>());
 
         NioEventLoopGroup mainGroup = new NioEventLoopGroup();
         NioEventLoopGroup workerGroup = new NioEventLoopGroup();
@@ -76,6 +68,8 @@ public class TelnetIRCServer {
                                     .addLast(new MessageChannelHandler());
                         }
 
+
+
                     })
                     .option(ChannelOption.SO_BACKLOG, 128)
                     .childOption(ChannelOption.SO_KEEPALIVE, true);
@@ -88,6 +82,5 @@ public class TelnetIRCServer {
             workerGroup.shutdownGracefully();
         }
     }
-
 }
 
