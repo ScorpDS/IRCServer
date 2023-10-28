@@ -58,9 +58,9 @@ public class TelnetIRCServer {
             b.group(mainGroup, workerGroup)
                     .channel(NioServerSocketChannel.class)
                     .handler(new LoggingHandler(LogLevel.INFO))
-                    .childHandler(new ChannelInitializer<SocketChannel>() {
+                    .childHandler(new ChannelInitializer<>() {
                         @Override
-                        protected void initChannel(SocketChannel ch) {
+                        protected void initChannel(Channel ch) {
                             ch.pipeline()
                                     .addLast(new DelimiterBasedFrameDecoder(8192, Delimiters.lineDelimiter()))
                                     .addLast(new RefinedStringDecoder())
